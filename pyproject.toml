@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "walkforward-guard"
+version = "0.1.0"
+description = "An assertion-level leak guard for time-series cross-validation: expanding-window walk-forward splits with a purge gap, and a truncation-invariance check for feature functions."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Neel Shah", email = "neeljshah22@gmail.com" }]
+dependencies = ["numpy", "pandas"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/neeljshah/walkforward-guard"
+
+[tool.setuptools.packages.find]
+where = ["src"]
