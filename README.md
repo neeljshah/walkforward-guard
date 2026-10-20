@@ -10,6 +10,8 @@ undetected leak in a backtest can make a null result look like an edge. This
 repo keeps only the validation piece, rebuilt against a generic synthetic
 time series -- no sports data, no proprietary features.
 
+That system is CourtVision, a four-sport forecasting system audited in public; the measured results and the retraction record are in its evidence index: https://github.com/neeljshah/court-vision/blob/master/EVIDENCE.md
+
 ## Why k-fold on time series lies to you
 
 Standard k-fold cross-validation assumes rows are exchangeable. Time-series
