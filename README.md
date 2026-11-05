@@ -1,138 +1,114 @@
 # walkforward-guard
 
-An assertion-level leak guard for time-series cross-validation. Not a
-model, not a strategy -- a small piece of validation infrastructure that
-makes it structurally hard to fool yourself about how good a time-series
-model is.
+Create expanding-window time-series splits with a purge gap, and check whether a
+feature changes when future rows are removed. These checks make timestamp
+ordering and lookahead errors visible before model training or evaluation.
 
-Distilled out of a larger multi-sport forecasting system, where a single
-undetected leak in a backtest can make a null result look like an edge. This
-repo keeps only the validation piece, rebuilt against a generic synthetic
-time series -- no sports data, no proprietary features.
+The package depends on NumPy and pandas. It supplies validation checks, not a
+forecasting model or proof that a complete pipeline is free of leakage.
 
-That system is CourtVision, a four-sport forecasting system audited in public; the measured results and the retraction record are in its evidence index: https://github.com/neeljshah/court-vision/blob/master/EVIDENCE.md
+## Install
 
-## Why k-fold on time series lies to you
+Requires Python 3.10 or later.
 
-Standard k-fold cross-validation assumes rows are exchangeable. Time-series
-rows are not: row 500 was measured after row 499 learned something about the
-world that row 499 didn't have yet. Shuffle-then-split lets your model
-"train" on data from next month and "test" on data from last month --
-information that was never available at prediction time leaks backward into
-training, and your validation score quietly stops meaning anything.
-
-The usual fix -- "just use a time-ordered split" -- is necessary but not
-sufficient. Two more failure modes slip through even a chronologically
-ordered split:
-
-- **A single split window.** One train/test boundary is one sample size of
-  one. A lucky (or unlucky) cutoff makes a result look robust when it's an
-  artifact of that one boundary.
-- **Feature leakage inside a "correct" split.** The split can be perfectly
-  time-ordered and the *feature engineering* can still read the future --
-  a centered rolling window, a `groupby().transform()` that sees the whole
-  group, a join on a table that wasn't itself truncated. The split being
-  right tells you nothing about whether the features feeding it are right.
-
-## What this package does about it
-
-**1. `WalkForwardSplitter`** -- expanding-window walk-forward CV with a
-purge gap. Every fold it yields has already been asserted leak-free before
-your training loop ever sees it:
-
-```python
-max(train_timestamps) < min(test_timestamps)
+```bash
+git clone https://github.com/neeljshah/walkforward-guard.git
+cd walkforward-guard
+python -m pip install -e ".[dev]"
 ```
 
-If that assertion fails -- a shuffled frame, duplicate timestamps, an
-off-by-one in the split math -- it raises `LeakError` immediately, at the
-fold, not three weeks later when someone asks why the backtest looks too
-good.
+The `dev` extra installs pytest; use `-e .` for the library alone.
 
-**2. `assert_truncation_invariant`** -- a property test for a feature
-function. A correct "as of time `t`" feature must return the identical
-value whether you hand it the full future-including dataset or a dataset
-truncated at `t` before it ever runs:
+## Runnable example
 
-```python
-featurize(full_data, t) == featurize(full_data[full_data.ts <= t], t)
+```bash
+python examples/demo_catch_a_leak.py
 ```
 
-If it doesn't, the feature is reading something after `t` -- and a single
-train/test split will never catch this, because a single split never
-re-runs the same cutoff with two different amounts of "future" attached to
-see if the answer changes.
+The demo uses a seeded synthetic time series. It deliberately plants shuffled
+folds and a centered rolling-window feature, and prints:
 
-## Quickstart
+```text
+--- Failure mode 1: shuffled timestamps fed to the splitter ---
+CAUGHT: 'ts' is not sorted ascending -- sort the frame before splitting, a shuffled index is the #1 way folds leak.
+
+--- Failure mode 2: centered rolling window (reads the future) ---
+CAUGHT: truncation invariance violated at t=2026-04-11 00:00:00: featurize_fn(full)=9.054609396769228 != featurize_fn(truncated)=8.744403704002325. The function is using rows after t -- it is leaking the future.
+Sanity check: the honest trailing-window feature passes clean...
+PASSED (no leak) as expected.
+
+=== summary ===
+shuffled-folds leak caught:      True
+centered-window leak caught:     True
+
+Both planted leaks were caught by the guard. Exiting 1 (nonzero) -- that's the guard doing its job.
+```
+
+**Expected exit code: 1.** Both planted leaks were caught. In this particular
+demo, exit code 0 means at least one planted leak was missed. The unit-test
+command below uses the normal convention: exit code 0 means tests passed.
+
+## Python API
 
 ```python
 import pandas as pd
-from walkforward_guard import WalkForwardSplitter, assert_truncation_invariant, LeakError
+from walkforward_guard import WalkForwardSplitter, assert_truncation_invariant
 
-df = pd.DataFrame({
-    "ts": pd.date_range("2026-01-01", periods=200, freq="D"),
-    "value": range(200),
+frame = pd.DataFrame({
+    "ts": pd.date_range("2026-01-01", periods=100, freq="D", tz="UTC"),
+    "value": range(100),
 })
+folds = list(WalkForwardSplitter(n_splits=4, purge_gap="5D").split(frame, "ts"))
+print(len(folds))
+print(all(fold.train_end < fold.test_start for fold in folds))
 
-# 1. Split with a leak guard baked in.
-splitter = WalkForwardSplitter(n_splits=5, purge_gap="2D")
-for fold in splitter.split(df, time_col="ts"):
-    train, test = df.iloc[fold.train_idx], df.iloc[fold.test_idx]
-    # ... fit on train, score on test ...
+def trailing_mean(events, cutoff):
+    return float(events.loc[events["ts"] <= cutoff, "value"].tail(5).mean())
 
-# 2. Check a feature function can't see the future.
-def trailing_mean(events, t):
-    return events[events["ts"] <= t]["value"].tail(5).mean()
-
-assert_truncation_invariant(trailing_mean, df, df["ts"].iloc[100])  # passes
-
-def leaky_mean(events, t):
-    return events["value"].mean()  # bug: ignores t entirely
-
-try:
-    assert_truncation_invariant(leaky_mean, df, df["ts"].iloc[100])
-except LeakError as e:
-    print("caught:", e)
+assert_truncation_invariant(trailing_mean, frame, frame["ts"].iloc[50])
 ```
 
-## How this catches real leaks
+```text
+4
+True
+```
 
-`examples/demo_catch_a_leak.py` plants both failure modes on a synthetic
-random-walk series and shows the guard catching each one:
+`Fold.train_idx` and `Fold.test_idx` are positional indices for `frame.iloc`.
+The splitter requires ascending timestamps, removes training rows at or after
+`test_start - purge_gap`, and checks `max(train_time) < min(test_time)` before
+yielding each fold. Use a nonnegative purge gap that reflects your label and
+feature availability delays. A fold with no training rows left after purging is
+skipped, so a large gap can produce fewer than `n_splits` folds.
 
-1. **Shuffled input.** The dataset is shuffled (as if someone used a random
-   `train_test_split` instead of a time split) and handed to
-   `WalkForwardSplitter`. It refuses to yield a single fold and raises
-   `LeakError` before any model would have trained on it.
-2. **Centered rolling window.** A "trailing 5-day mean" feature is
-   implemented with `rolling("5D", center=True)` instead of a trailing-only
-   window -- an easy, common mistake. `assert_truncation_invariant` catches
-   the mismatch between the full-data and truncated-data results and raises
-   `LeakError`, while the corrected trailing-only version passes clean.
+`assert_truncation_invariant` compares the supplied function's result on the full
+frame with its result on rows whose timestamps are at or before the cutoff. A
+mismatch raises `LeakError`. Scalar floats use NumPy's default `isclose`
+tolerance; other results use equality or array equality.
 
-Run it: `python examples/demo_catch_a_leak.py`. It exits `1` once both
-planted leaks are caught -- in this demo, a "successful" run looks like a
-failing CI check, which is exactly what you want a leak guard to do in a
-real pipeline.
+## Limits
 
-## Install / test
+Use consistent datetime types and timezones, deterministic feature functions,
+and timestamps that represent when information was actually available. The
+splitter checks the timestamps it receives; it cannot validate external joins,
+label construction or preprocessing fitted outside the training fold. A
+truncation check covers the supplied function, dataset and cutoff, so run it at
+multiple representative cutoffs. A passing check is not a complete leakage
+audit.
+
+## Tests
 
 ```bash
-pip install -e ".[dev]"
-python -m pytest tests/ -q
+python -m pytest tests/test_core.py -q
 ```
 
-## Scope
+The seven tests cover forward ordering, purge gaps, UTC-aware timestamps,
+shuffled input, invalid configuration and honest versus leaky feature functions.
+GitHub Actions runs this file with a two-minute test timeout.
 
-This is validation tooling, not a forecasting model and not a claim of
-predictive edge. It does one job: make it hard to accidentally lie to
-yourself about whether a time-series model generalizes forward in time.
+## Context and license
 
-## Author
+[The CourtVision evidence site](https://neeljshah.github.io/court-vision/)
+contains the forecasting results and public retraction record. Its moneyline
+models land near the devigged close without beating it; totals and tennis trail.
 
-Neel Shah -- [neeljshah22@gmail.com](mailto:neeljshah22@gmail.com) --
-[github.com/neeljshah](https://github.com/neeljshah)
-
-## License
-
-MIT, see [LICENSE](LICENSE).
+[MIT](LICENSE), copyright Neel Shah 2026.
