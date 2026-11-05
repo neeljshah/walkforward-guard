@@ -30,6 +30,17 @@ def test_splitter_purge_gap_removes_train_rows_near_boundary():
         assert b.test_start - b.train_end >= pd.Timedelta("5D")
 
 
+def test_splitter_preserves_timezone_with_purge_gap():
+    df = make_df()
+    df["ts"] = df["ts"].dt.tz_localize("UTC")
+    folds = list(WalkForwardSplitter(n_splits=4, purge_gap="5D").split(df, "ts"))
+    assert len(folds) == 4
+    for fold in folds:
+        assert str(fold.train_end.tz) == "UTC"
+        assert str(fold.test_start.tz) == "UTC"
+        assert fold.train_end < fold.test_start - pd.Timedelta("5D")
+
+
 def test_leak_error_on_shuffled_dates():
     df = make_df().sample(frac=1.0, random_state=1).reset_index(drop=True)
     splitter = WalkForwardSplitter(n_splits=4)

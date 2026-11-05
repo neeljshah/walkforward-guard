@@ -108,7 +108,7 @@ class WalkForwardSplitter:
 
             # Apply the purge gap: drop train rows too close to the test window.
             cutoff = times.iloc[test_start] - self.purge_gap
-            keep = times.iloc[train_idx].values < cutoff
+            keep = (times.iloc[train_idx] < cutoff).to_numpy()
             train_idx = train_idx[keep]
 
             if len(train_idx) == 0:
